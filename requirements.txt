@@ -1,0 +1,7 @@
+customtkinter
+PyMuPDF
+python-docx
+pdf2docx
+Pillow
+tkinterdnd2
+paddleocr

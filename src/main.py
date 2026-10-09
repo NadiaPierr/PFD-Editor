@@ -1,4 +1,4 @@
-﻿#version 0.0.20
+﻿#version 0.1.0
 from io import BytesIO
 import json
 from pathlib import Path
@@ -20,6 +20,7 @@ from docx.shared import Pt
 from pdf2docx import Converter
 from PIL import Image, ImageDraw, ImageOps, ImageTk
 from tkinterdnd2 import DND_FILES, TkinterDnD
+from word_to_pdf import convert_word_to_pdf
 
 
 class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
@@ -28,13 +29,14 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.TkdndVersion = TkinterDnD._require(self)
 
         self.title("PDF Editor")
-        self.geometry("1100x720")
-        self.minsize(860, 560)
+        self.geometry("1240x780")
+        self.minsize(980, 640)
         self.after(0, self.open_maximized)
-        self.configure(fg_color=("#f4f6f8", "#111317"))
+        self.configure(fg_color=("#f5f7fb", "#0d1117"))
 
         self.pdf_document = None
         self.pdf_path = None
+        self.word_path = None
         self.current_page_index = 0
         self.preview_image = None
         self.preview_base_image = None
@@ -54,6 +56,7 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.scan_to_word_process_lock = threading.Lock()
         self.scan_to_word_cancel_requested = threading.Event()
         self.scan_to_word_poll_job = None
+        self.tools_scroll_update_job = None
 
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
@@ -73,223 +76,160 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         sidebar = ctk.CTkFrame(
             self,
-            width=240,
+            width=304,
             corner_radius=0,
-            fg_color=("#ffffff", "#171a20"),
+            fg_color=("#f8fafc", "#111827"),
+            border_width=0,
         )
         sidebar.grid(row=0, column=0, sticky="nsw")
         sidebar.grid_propagate(False)
         sidebar.grid_columnconfigure(0, weight=1)
-        sidebar.grid_rowconfigure(18, weight=1)
+        sidebar.grid_rowconfigure(4, weight=1)
 
-        title = ctk.CTkLabel(
-            sidebar,
-            text="PDF Editor",
-            font=ctk.CTkFont(size=26, weight="bold"),
-        )
-        title.grid(row=0, column=0, padx=18, pady=(28, 6), sticky="w")
-
-        subtitle = ctk.CTkLabel(
-            sidebar,
-            text="Open, preview, and convert PDF files.",
-            text_color=("#667085", "#9aa4b2"),
-            anchor="w",
-            justify="left",
-            wraplength=190,
-        )
-        subtitle.grid(row=1, column=0, padx=18, pady=(0, 24), sticky="ew")
+        brand = ctk.CTkFrame(sidebar, fg_color="transparent")
+        brand.grid(row=0, column=0, padx=24, pady=(24, 20), sticky="ew")
+        brand.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            brand, text="P", width=44, height=44, corner_radius=12,
+            fg_color=("#2563eb", "#3b82f6"), text_color="#ffffff",
+            font=ctk.CTkFont(size=22, weight="bold"),
+        ).grid(row=0, column=0, rowspan=2, padx=(0, 12))
+        ctk.CTkLabel(
+            brand, text="PDF Studio", anchor="w",
+            font=ctk.CTkFont(size=21, weight="bold"),
+        ).grid(row=0, column=1, sticky="sw")
+        ctk.CTkLabel(
+            brand, text="DOCUMENT WORKSPACE", anchor="w",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color=("#64748b", "#94a3b8"),
+        ).grid(row=1, column=1, sticky="nw")
 
         self.open_button = ctk.CTkButton(
-            sidebar,
-            text="Open PDF",
-            height=44,
-            corner_radius=8,
+            sidebar, text="＋   Open document", height=52, corner_radius=11,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            fg_color=("#2563eb", "#2563eb"), hover_color=("#1d4ed8", "#3b82f6"),
             command=self.open_pdf,
         )
-        self.open_button.grid(row=2, column=0, padx=18, pady=(0, 14), sticky="ew")
+        self.open_button.grid(row=1, column=0, padx=24, pady=(0, 20), sticky="ew")
 
-        drop_hint = ctk.CTkLabel(
-            sidebar,
-            text="You can also drag a PDF into the preview area.",
-            text_color=("#667085", "#9aa4b2"),
-            anchor="w",
-            justify="left",
-            wraplength=190,
+        document_card = ctk.CTkFrame(
+            sidebar, corner_radius=12, fg_color=("#ffffff", "#1e293b"),
+            border_width=2, border_color=("#bfdbfe", "#334e72"),
         )
-        drop_hint.grid(row=3, column=0, padx=18, pady=(0, 22), sticky="ew")
-
-        details_label = ctk.CTkLabel(
-            sidebar,
-            text="Document",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w",
-            text_color=("#344054", "#e4e7ec"),
-        )
-        details_label.grid(row=4, column=0, padx=18, pady=(0, 8), sticky="ew")
-
+        document_card.grid(row=2, column=0, padx=24, pady=(0, 22), sticky="ew")
+        document_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            document_card, text="CURRENT DOCUMENT", anchor="w",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=("#2563eb", "#60a5fa"),
+        ).grid(row=0, column=0, padx=15, pady=(13, 6), sticky="ew")
         self.file_label = ctk.CTkLabel(
-            sidebar,
-            text="No file selected.",
-            fg_color=("#f2f4f7", "#20242c"),
-            corner_radius=8,
-            anchor="w",
-            justify="left",
-            height=46,
-            wraplength=180,
-            text_color=("#344054", "#e4e7ec"),
+            document_card, text="No document open", anchor="w", justify="left",
+            wraplength=220, font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=("#0f172a", "#ffffff"),
         )
-        self.file_label.grid(row=5, column=0, padx=18, pady=(0, 10), sticky="ew")
-
+        self.file_label.grid(row=1, column=0, padx=15, sticky="ew")
         self.page_label = ctk.CTkLabel(
-            sidebar,
-            text="Pages: -",
-            text_color=("#667085", "#9aa4b2"),
-            anchor="w",
-            justify="left",
+            document_card, text="Drop a PDF into the workspace", anchor="w",
+            text_color=("#475569", "#cbd5e1"), font=ctk.CTkFont(size=12),
         )
-        self.page_label.grid(row=6, column=0, padx=18, pady=(0, 24), sticky="ew")
+        self.page_label.grid(row=2, column=0, padx=15, pady=(4, 13), sticky="ew")
 
-        theme_label = ctk.CTkLabel(
-            sidebar,
-            text="Theme",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w",
-            text_color=("#344054", "#e4e7ec"),
-        )
-        theme_label.grid(row=7, column=0, padx=18, pady=(0, 8), sticky="ew")
+        ctk.CTkLabel(
+            sidebar, text="TOOLS", anchor="w", font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=("#334155", "#e2e8f0"),
+        ).grid(row=3, column=0, padx=26, pady=(0, 9), sticky="ew")
 
-        self.theme_selector = ctk.CTkSegmentedButton(
-            sidebar,
-            values=["System", "Light", "Dark"],
-            command=self.change_theme,
+        tools = ctk.CTkScrollableFrame(
+            sidebar, fg_color=("#f1f5f9", "#172033"), corner_radius=12,
+            scrollbar_button_color=("#cbd5e1", "#334155"),
+            scrollbar_button_hover_color=("#94a3b8", "#475569"),
         )
-        self.theme_selector.grid(row=8, column=0, padx=18, pady=(0, 24), sticky="ew")
-        self.theme_selector.set("System")
+        self.tools_frame = tools
+        tools.grid(row=4, column=0, padx=(16, 10), pady=0, sticky="nsew")
+        tools.grid_columnconfigure(0, weight=1)
 
-        actions_label = ctk.CTkLabel(
-            sidebar,
-            text="Actions",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w",
-            text_color=("#344054", "#e4e7ec"),
-        )
-        actions_label.grid(row=9, column=0, padx=18, pady=(0, 8), sticky="ew")
+        def section(row, title):
+            ctk.CTkLabel(
+                tools, text=f"  {title}", height=28, corner_radius=7, anchor="w",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color=("#e2e8f0", "#263348"),
+                text_color=("#475569", "#cbd5e1"),
+            ).grid(row=row, column=0, padx=6, pady=(14 if row else 6, 6), sticky="ew")
 
-        self.convert_button = ctk.CTkButton(
-            sidebar,
-            text="Convert to Word",
-            height=42,
-            corner_radius=8,
-            fg_color=("#344054", "#344054"),
-            hover_color=("#1d2939", "#475467"),
-            command=self.convert_pdf_to_word,
-            state="disabled",
-        )
-        self.convert_button.grid(row=10, column=0, padx=18, pady=(0, 12), sticky="new")
+        def action(row, text, command, enabled=True, primary=False):
+            button = ctk.CTkButton(
+                tools, text=f"  {text}", height=46, corner_radius=9, anchor="w",
+                font=ctk.CTkFont(size=14, weight="bold"),
+                fg_color=(("#dbeafe", "#1d4f7a") if primary else ("#ffffff", "#243044")),
+                hover_color=(("#bfdbfe", "#256296") if primary else ("#e2e8f0", "#334155")),
+                text_color=(("#1d4ed8", "#dbeafe") if primary else ("#1e293b", "#f1f5f9")),
+                text_color_disabled=("#94a3b8", "#64748b"),
+                border_width=1,
+                border_color=(("#93c5fd", "#3b82f6") if primary else ("#d8e0e9", "#35445b")),
+                command=command, state="normal" if enabled else "disabled",
+            )
+            button.grid(row=row, column=0, padx=6, pady=4, sticky="ew")
+            return button
 
-        self.merge_button = ctk.CTkButton(
-            sidebar,
-            text="Merge PDFs",
-            height=42,
-            corner_radius=8,
-            fg_color=("#475467", "#475467"),
-            hover_color=("#344054", "#667085"),
-            command=self.merge_pdf_files,
-        )
-        self.merge_button.grid(row=11, column=0, padx=18, pady=(0, 12), sticky="new")
-
-        self.extract_button = ctk.CTkButton(
-            sidebar,
-            text="Extract Text",
-            height=42,
-            corner_radius=8,
-            fg_color=("#475467", "#475467"),
-            hover_color=("#344054", "#667085"),
-            command=self.toggle_extract_mode,
-            state="disabled",
-        )
-        self.extract_button.grid(row=12, column=0, padx=18, pady=(0, 12), sticky="new")
-
-        self.scan_to_word_button = ctk.CTkButton(
-            sidebar,
-            text="Scan PDF to Word",
-            height=42,
-            corner_radius=8,
-            fg_color=("#475467", "#475467"),
-            hover_color=("#344054", "#667085"),
-            command=self.show_scan_to_word_dialog,
-            state="disabled",
-        )
-        self.scan_to_word_button.grid(row=13, column=0, padx=18, pady=(0, 12), sticky="new")
-
-        self.split_button = ctk.CTkButton(
-            sidebar,
-            text="Split PDF",
-            height=42,
-            corner_radius=8,
-            fg_color=("#475467", "#475467"),
-            hover_color=("#344054", "#667085"),
-            command=self.show_split_pdf_dialog,
-            state="disabled",
-        )
-        self.split_button.grid(row=14, column=0, padx=18, pady=(0, 12), sticky="new")
-
-        self.images_to_pdf_button = ctk.CTkButton(
-            sidebar,
-            text="Images to PDF",
-            height=42,
-            corner_radius=8,
-            fg_color=("#475467", "#475467"),
-            hover_color=("#344054", "#667085"),
-            command=self.convert_images_to_pdf,
-        )
-        self.images_to_pdf_button.grid(row=15, column=0, padx=18, pady=(0, 12), sticky="new")
+        section(0, "CONVERT")
+        self.convert_button = action(1, "▣   PDF to Word", self.convert_pdf_to_word, False, True)
+        self.scan_to_word_button = action(2, "◎   Scanned PDF to Word", self.show_scan_to_word_dialog, False)
+        self.word_to_pdf_button = action(3, "W   Word to PDF", self.choose_word_to_pdf)
+        self.images_to_pdf_button = action(4, "▧   Images to PDF", self.convert_images_to_pdf)
+        section(5, "ORGANIZE")
+        self.merge_button = action(6, "⊕   Merge PDF files", self.merge_pdf_files)
+        self.split_button = action(7, "✂   Split PDF", self.show_split_pdf_dialog, False)
+        section(8, "CONTENT")
+        self.extract_button = action(9, "T   Extract text", self.toggle_extract_mode, False)
 
         self.scan_progress = ctk.CTkProgressBar(
-            sidebar,
-            mode="indeterminate",
-            height=8,
-            corner_radius=4,
+            sidebar, mode="indeterminate", height=5, corner_radius=3,
         )
-        self.scan_progress.grid(row=16, column=0, padx=18, pady=(0, 8), sticky="ew")
+        self.scan_progress.grid(row=6, column=0, padx=22, pady=(8, 4), sticky="ew")
         self.scan_progress.grid_remove()
 
         self.cancel_scan_button = ctk.CTkButton(
-            sidebar,
-            text="Cancel conversion",
-            height=34,
-            corner_radius=8,
-            fg_color=("#b42318", "#b42318"),
-            hover_color=("#912018", "#d92d20"),
+            sidebar, text="Cancel conversion", height=34, corner_radius=8,
+            fg_color=("#dc2626", "#b91c1c"), hover_color=("#b91c1c", "#dc2626"),
             command=self.cancel_scan_to_word,
         )
-        self.cancel_scan_button.grid(row=17, column=0, padx=18, pady=(0, 8), sticky="ew")
+        self.cancel_scan_button.grid(row=7, column=0, padx=22, pady=(4, 8), sticky="ew")
         self.cancel_scan_button.grid_remove()
 
-        self.status_label = ctk.CTkLabel(
-            sidebar,
-            text="",
-            text_color=("#667085", "#9aa4b2"),
-            anchor="w",
-            justify="left",
-            wraplength=190,
+        footer = ctk.CTkFrame(
+            sidebar, corner_radius=10, fg_color=("#ffffff", "#1e293b"),
+            border_width=1, border_color=("#e2e8f0", "#334155"),
         )
-        self.status_label.grid(row=18, column=0, padx=18, pady=(0, 24), sticky="sew")
+        footer.grid(row=8, column=0, padx=24, pady=(12, 18), sticky="sew")
+        footer.grid_columnconfigure(0, weight=1)
+        self.status_label = ctk.CTkLabel(
+            footer, text="●  Ready", text_color=("#15803d", "#4ade80"),
+            anchor="w", justify="left", wraplength=230,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.status_label.grid(row=0, column=0, padx=12, pady=(10, 8), sticky="ew")
+        self.theme_selector = ctk.CTkSegmentedButton(
+            footer, values=["System", "Light", "Dark"], height=30,
+            font=ctk.CTkFont(size=11), command=self.change_theme,
+        )
+        self.theme_selector.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
+        self.theme_selector.set("System")
 
-        preview_area = ctk.CTkFrame(self, fg_color=("#f4f6f8", "#111317"), corner_radius=0)
+        preview_area = ctk.CTkFrame(self, fg_color=("#f5f7fb", "#0d1117"), corner_radius=0)
         preview_area.grid(row=0, column=1, padx=0, pady=0, sticky="nsew")
         preview_area.grid_columnconfigure(0, weight=1)
         preview_area.grid_rowconfigure(1, weight=1)
 
         top_bar = ctk.CTkFrame(preview_area, fg_color="transparent")
-        top_bar.grid(row=0, column=0, columnspan=2, padx=28, pady=(24, 12), sticky="ew")
+        top_bar.grid(row=0, column=0, columnspan=2, padx=30, pady=(20, 14), sticky="ew")
         top_bar.grid_columnconfigure(0, weight=1)
 
         self.page_number_label = ctk.CTkLabel(
             top_bar,
-            text="No document",
-            font=ctk.CTkFont(size=15, weight="bold"),
-            text_color=("#344054", "#e4e7ec"),
+            text="Workspace",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=("#1e293b", "#f1f5f9"),
             anchor="w",
         )
         self.page_number_label.grid(row=0, column=0, sticky="w")
@@ -300,9 +240,9 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.zoom_out_button = ctk.CTkButton(
             zoom_controls,
-            text="-",
-            width=34,
-            height=30,
+            text="−", width=36, height=34, corner_radius=8,
+            fg_color=("#ffffff", "#202733"), text_color=("#334155", "#e2e8f0"),
+            hover_color=("#e2e8f0", "#2a3442"),
             command=self.zoom_out,
             state="disabled",
         )
@@ -312,15 +252,16 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
             zoom_controls,
             text="100%",
             width=58,
-            text_color=("#344054", "#e4e7ec"),
+            text_color=("#475569", "#cbd5e1"), font=ctk.CTkFont(size=12, weight="bold"),
         )
         self.zoom_label.grid(row=0, column=1, padx=(0, 6))
 
         self.zoom_in_button = ctk.CTkButton(
             zoom_controls,
             text="+",
-            width=34,
-            height=30,
+            width=36, height=34, corner_radius=8,
+            fg_color=("#ffffff", "#202733"), text_color=("#334155", "#e2e8f0"),
+            hover_color=("#e2e8f0", "#2a3442"),
             command=self.zoom_in,
             state="disabled",
         )
@@ -328,9 +269,9 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.zoom_reset_button = ctk.CTkButton(
             zoom_controls,
-            text="Fit",
-            width=44,
-            height=30,
+            text="Fit", width=48, height=34, corner_radius=8,
+            fg_color=("#ffffff", "#202733"), text_color=("#334155", "#e2e8f0"),
+            hover_color=("#e2e8f0", "#2a3442"),
             command=self.reset_zoom,
             state="disabled",
         )
@@ -338,17 +279,17 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.preview_frame = ctk.CTkFrame(
             preview_area,
-            fg_color=("#e9edf2", "#161a20"),
-            corner_radius=12,
+            fg_color=("#e8edf4", "#111821"), corner_radius=14,
+            border_width=1, border_color=("#dbe2ea", "#263241"),
         )
-        self.preview_frame.grid(row=1, column=0, padx=(28, 10), pady=(0, 28), sticky="nsew")
+        self.preview_frame.grid(row=1, column=0, padx=(30, 10), pady=(0, 24), sticky="nsew")
         self.preview_frame.grid_columnconfigure(0, weight=1)
         self.preview_frame.grid_rowconfigure(0, weight=1)
         self.preview_frame.bind("<Configure>", self.schedule_preview_rerender)
 
         self.preview_canvas = tk.Canvas(
             self.preview_frame,
-            bg="#e9edf2",
+            bg=self.preview_background_color(),
             bd=0,
             highlightthickness=0,
         )
@@ -356,9 +297,8 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.preview_canvas.create_text(
             0,
             0,
-            text="Drop a PDF here\nor use Open PDF",
-            fill="#667085",
-            font=("Arial", 18, "bold"),
+            text="Drop a PDF here\n\n—or—\n\nChoose Open document",
+            fill="#64748b", font=("Segoe UI", 16, "bold"),
             justify="center",
             tags=("placeholder",),
         )
@@ -376,11 +316,43 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
             command=self.on_page_scroll,
             width=16,
         )
-        self.page_scrollbar.grid(row=1, column=1, padx=(0, 18), pady=(0, 28), sticky="ns")
+        self.page_scrollbar.grid(row=1, column=1, padx=(0, 20), pady=(12, 36), sticky="ns")
         self.page_scrollbar.set(0, 1)
         self.preview_canvas.configure(yscrollcommand=self.on_canvas_scroll)
 
         self.bind("<MouseWheel>", self.on_mouse_wheel)
+        self.bind("<Control-o>", lambda _event: self.open_pdf())
+        self.bind("<Control-plus>", lambda _event: self.zoom_in())
+        self.bind("<Control-minus>", lambda _event: self.zoom_out())
+        self.bind("<Configure>", self.schedule_tools_scrollbar_update, add="+")
+        self.after_idle(self.update_tools_scrollbar_visibility)
+
+    def schedule_tools_scrollbar_update(self, _event=None):
+        if self.tools_scroll_update_job is not None:
+            self.after_cancel(self.tools_scroll_update_job)
+        self.tools_scroll_update_job = self.after(80, self.update_tools_scrollbar_visibility)
+
+    def update_tools_scrollbar_visibility(self):
+        self.tools_scroll_update_job = None
+        if not hasattr(self, "tools_frame"):
+            return
+
+        tools = self.tools_frame
+        tools.update_idletasks()
+        content_height = tools.grid_bbox()[3]
+        viewport = getattr(tools, "_parent_frame", tools)
+        available_height = viewport.winfo_height()
+        scrollbar = getattr(tools, "_scrollbar", None)
+        if scrollbar is None:
+            return
+
+        if content_height > available_height + 2:
+            scrollbar.grid()
+        else:
+            scrollbar.grid_remove()
+
+    def preview_background_color(self):
+        return "#111821" if ctk.get_appearance_mode() == "Dark" else "#e8edf4"
 
     def enable_drag_and_drop(self):
         for widget in (self, self.preview_frame, self.preview_canvas):
@@ -389,6 +361,10 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def change_theme(self, theme):
         ctk.set_appearance_mode(theme)
+        if hasattr(self, "preview_canvas"):
+            self.preview_canvas.configure(bg=self.preview_background_color())
+            placeholder_color = "#94a3b8" if ctk.get_appearance_mode() == "Dark" else "#64748b"
+            self.preview_canvas.itemconfigure("placeholder", fill=placeholder_color)
 
     def on_file_drop(self, event):
         file_paths = self.tk.splitlist(event.data)
@@ -396,11 +372,13 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
             return
 
         dropped_path = Path(file_paths[0])
-        if dropped_path.suffix.lower() != ".pdf":
-            messagebox.showwarning("Invalid file", "Drop a PDF file to open it.")
-            return
-
-        self.load_pdf(dropped_path)
+        if dropped_path.suffix.lower() == ".pdf":
+            self.load_pdf(dropped_path)
+        elif dropped_path.suffix.lower() in {".doc", ".docx"}:
+            self.load_word_document(dropped_path)
+            self.convert_word_file_to_pdf(dropped_path)
+        else:
+            messagebox.showwarning("Unsupported file", "Drop a PDF or Word document.")
 
     def open_pdf(self):
         file_path = filedialog.askopenfilename(
@@ -412,6 +390,64 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
             return
 
         self.load_pdf(Path(file_path))
+
+    def choose_word_to_pdf(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Word document",
+            filetypes=[("Word documents", "*.doc *.docx"), ("All files", "*.*")],
+        )
+        if file_path:
+            self.load_word_document(Path(file_path))
+            self.convert_word_file_to_pdf(Path(file_path))
+
+    def load_word_document(self, file_path):
+        self.word_path = Path(file_path)
+        self.file_label.configure(text=self.word_path.name)
+        self.page_label.configure(text="Word document  •  Ready to convert")
+        self.page_number_label.configure(text="Word to PDF")
+        self.status_label.configure(text="Word document selected")
+        self.set_document_action_states("word")
+
+    def convert_word_file_to_pdf(self, file_path=None):
+        source = Path(file_path) if file_path else self.word_path
+        if source is None:
+            return
+        output_path = filedialog.asksaveasfilename(
+            title="Save PDF",
+            defaultextension=".pdf",
+            initialfile=f"{source.stem}.pdf",
+            filetypes=[("PDF files", "*.pdf")],
+        )
+        if not output_path:
+            return
+        self.word_to_pdf_button.configure(state="disabled")
+        self.status_label.configure(text="Converting Word to PDF...")
+        self.update_idletasks()
+        try:
+            result = convert_word_to_pdf(source, output_path)
+        except Exception as exc:
+            self.status_label.configure(text="Word conversion failed")
+            messagebox.showerror("Conversion error", str(exc))
+        else:
+            self.status_label.configure(text=f"Saved: {result.name}")
+            messagebox.showinfo("Conversion complete", "The PDF was saved successfully.")
+        finally:
+            self.word_to_pdf_button.configure(state="normal")
+
+    def set_document_action_states(self, document_type):
+        pdf_state = "normal" if document_type == "pdf" else "disabled"
+        for button in (
+            self.convert_button,
+            self.extract_button,
+            self.scan_to_word_button,
+            self.split_button,
+        ):
+            button.configure(state=pdf_state)
+        self.word_to_pdf_button.configure(
+            state="disabled" if document_type == "pdf" else "normal"
+        )
+        self.merge_button.configure(state="disabled" if document_type == "word" else "normal")
+        self.images_to_pdf_button.configure(state="normal" if document_type is None else "disabled")
 
     def load_pdf(self, file_path):
         try:
@@ -430,14 +466,12 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.pdf_document = document
         self.pdf_path = Path(file_path)
+        self.word_path = None
         self.current_page_index = 0
 
-        self.file_label.configure(text=f"File: {self.pdf_path.name}")
-        self.status_label.configure(text="")
-        self.convert_button.configure(state="normal")
-        self.extract_button.configure(state="normal")
-        self.scan_to_word_button.configure(state="normal")
-        self.split_button.configure(state="normal")
+        self.file_label.configure(text=self.pdf_path.name)
+        self.status_label.configure(text="Document loaded")
+        self.set_document_action_states("pdf")
         self.preview_base_image = None
         self.exit_extract_mode(update_status=False)
         self.zoom = 1.0
@@ -2006,8 +2040,8 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def update_current_page_from_scroll(self):
         if self.pdf_document is None or not self.page_layouts:
-            self.page_number_label.configure(text="No document")
-            self.page_label.configure(text="Pages: -")
+            self.page_number_label.configure(text="Workspace")
+            self.page_label.configure(text="Drop a PDF into the workspace")
             return
 
         viewport_top = self.preview_canvas.canvasy(0)
@@ -2019,8 +2053,8 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.current_page_index = current_layout["page_index"]
         current_page = self.current_page_index + 1
         total_pages = self.pdf_document.page_count
-        self.page_number_label.configure(text=f"Page {current_page}")
-        self.page_label.configure(text=f"Page {current_page} of {total_pages}")
+        self.page_number_label.configure(text=f"Page {current_page} of {total_pages}")
+        self.page_label.configure(text=f"{total_pages} page{'s' if total_pages != 1 else ''}  •  Viewing {current_page}")
 
     def zoom_in(self):
         self.set_zoom(self.zoom + 0.1)
@@ -2071,6 +2105,10 @@ class PDFEditorApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if self.resize_job is not None:
             self.after_cancel(self.resize_job)
             self.resize_job = None
+
+        if self.tools_scroll_update_job is not None:
+            self.after_cancel(self.tools_scroll_update_job)
+            self.tools_scroll_update_job = None
 
         if self.pdf_document is not None:
             self.pdf_document.close()

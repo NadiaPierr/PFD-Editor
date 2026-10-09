@@ -14,7 +14,7 @@ from collections.abc import Mapping
 import fitz
 import numpy as np
 from docx import Document
-from docx.shared import Inches, Pt
+from docx.shared import Inches, Pt, RGBColor
 from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from PIL import Image, ImageEnhance, ImageOps
@@ -25,6 +25,7 @@ from PIL import Image, ImageEnhance, ImageOps
 # few accessibility labels should still be treated as a scan.
 MINIMUM_DIGITAL_TEXT_CHARACTERS = 40
 MINIMUM_DIGITAL_ALPHANUMERIC_CHARACTERS = 12
+OCR_TEXT_DETECTION_LIMIT = 1920
 
 
 def configure_gpu_dlls():
@@ -166,8 +167,25 @@ def add_image_block(document, page_image, bbox, section):
     paragraph.add_run().add_picture(image_bytes, width=width)
 
 
-def add_text_block(document, content, label):
+def normalized_text_lines(content):
+    """Clean OCR lines and join words split only by a visual line break."""
     lines = [line.strip() for line in content.splitlines() if line.strip()]
+    normalized = []
+    for line in lines:
+        if (
+            normalized
+            and normalized[-1].endswith(("-", "‐", "‑"))
+            and line
+            and line[0].islower()
+        ):
+            normalized[-1] = normalized[-1][:-1] + line
+        else:
+            normalized.append(line)
+    return normalized
+
+
+def add_text_block(document, content, label):
+    lines = normalized_text_lines(content)
     if not lines:
         return
     if "title" in label:
@@ -202,26 +220,50 @@ def page_has_usable_text_layer(page):
     )
 
 
-def add_digital_page_text(document, page):
-    """Copy PDF text blocks directly, retaining their reading order.
+def pdf_color(value):
+    """Convert PyMuPDF's packed 0xRRGGBB colour to a python-docx colour."""
+    value = int(value or 0)
+    return RGBColor((value >> 16) & 255, (value >> 8) & 255, value & 255)
 
-    This is intentionally used only for pages with an existing text layer.
-    It avoids a lossy OCR pass and keeps Unicode text such as Greek intact.
-    """
-    text_blocks = []
-    for block in page.get_text("blocks"):
-        left, top, _right, _bottom, content, block_number, block_type = block
-        if block_type != 0:
-            continue
-        content = content.strip()
-        if content:
-            text_blocks.append((top, left, block_number, content))
 
-    for _top, _left, _block_number, content in sorted(text_blocks):
-        # A PDF text block normally represents one paragraph.  Preserve its
-        # line breaks within the paragraph instead of creating one paragraph
-        # per visual line.
-        document.add_paragraph(content)
+def add_digital_page_text(document, page, section=None):
+    """Copy editable PDF text while retaining span-level visual formatting."""
+    section = section or document.sections[-1]
+    page_width = max(float(page.rect.width), 1.0)
+    usable_width = available_content_width(section)
+    blocks = [
+        block
+        for block in page.get_text("dict").get("blocks", [])
+        if block.get("type") == 0 and block.get("lines")
+    ]
+
+    for block in order_positioned_items(blocks, lambda item: item.get("bbox"), page_width):
+        paragraph = document.add_paragraph()
+        left, _top, right, _bottom = block.get("bbox", (0, 0, page_width, 0))
+        paragraph.paragraph_format.left_indent = int(usable_width * max(0, left) / page_width)
+        paragraph.paragraph_format.right_indent = int(
+            usable_width * max(0, page_width - right) / page_width
+        )
+        paragraph.paragraph_format.space_after = Pt(3)
+
+        for line_index, line in enumerate(block.get("lines", [])):
+            if line_index:
+                paragraph.add_run().add_break()
+            spans = line.get("spans", [])
+            for span in spans:
+                text = span.get("text", "")
+                if not text:
+                    continue
+                run = paragraph.add_run(text)
+                flags = int(span.get("flags", 0))
+                run.bold = bool(flags & 16)
+                run.italic = bool(flags & 2)
+                run.font.superscript = bool(flags & 1)
+                run.font.size = Pt(max(1.0, float(span.get("size", 11))))
+                run.font.color.rgb = pdf_color(span.get("color", 0))
+                font_name = span.get("font")
+                if font_name:
+                    run.font.name = str(font_name).split("+")[-1]
 
 
 def render_scale_for_page(page):
@@ -253,6 +295,45 @@ def prepare_scanned_page_image(page):
     return ImageEnhance.Contrast(page_image).enhance(1.08)
 
 
+def order_positioned_items(items, bbox_getter, page_width):
+    """Return a reading order using recursive whitespace (XY-cut) analysis.
+
+    Unlike a plain top/left sort, this keeps the full left column together
+    before moving to the right column, while full-width titles and footers are
+    separated naturally by horizontal whitespace.
+    """
+    positioned = [item for item in items if bbox_getter(item) and len(bbox_getter(item)) == 4]
+    unpositioned = [item for item in items if item not in positioned]
+
+    def axis_gap(group, axis):
+        starts = sorted(group, key=lambda item: float(bbox_getter(item)[axis]))
+        best = None
+        running_end = float(bbox_getter(starts[0])[axis + 2])
+        for index in range(1, len(starts)):
+            start = float(bbox_getter(starts[index])[axis])
+            gap = start - running_end
+            if gap > 0 and (best is None or gap > best[0]):
+                best = (gap, index, starts)
+            running_end = max(running_end, float(bbox_getter(starts[index])[axis + 2]))
+        return best
+
+    def xy_cut(group):
+        if len(group) < 2:
+            return group
+        horizontal = axis_gap(group, 1)
+        vertical = axis_gap(group, 0)
+        # A vertical separator is decisive evidence of columns. Full-width
+        # titles/footers overlap both columns, so they naturally prevent that
+        # cut until a horizontal band has separated them from the body.
+        cut = vertical or horizontal
+        if cut is None:
+            return sorted(group, key=lambda item: (bbox_getter(item)[1], bbox_getter(item)[0]))
+        _gap, index, ordered = cut
+        return xy_cut(ordered[:index]) + xy_cut(ordered[index:])
+
+    return xy_cut(positioned) + unpositioned
+
+
 def add_layout_blocks(document, result, page_image, section):
     blocks = result.get("parsing_res_list", [])
     normalized_blocks = []
@@ -271,15 +352,10 @@ def add_layout_blocks(document, result, page_image, section):
         content = str(content or "").strip()
         normalized_blocks.append((label, content, bbox))
 
-    # Paddle's layout output may not always be in reading order.  A stable
-    # top-to-bottom, left-to-right order is markedly better for normal pages.
-    def reading_order(item):
-        bbox = item[2]
-        if bbox is None or len(bbox) != 4:
-            return (float("inf"), float("inf"))
-        return (float(bbox[1]), float(bbox[0]))
-
-    for label, content, bbox in sorted(normalized_blocks, key=reading_order):
+    ordered_blocks = order_positioned_items(
+        normalized_blocks, lambda item: item[2], page_image.width
+    )
+    for label, content, bbox in ordered_blocks:
         if label == "table":
             add_html_table(document, content)
         elif label in {"image", "figure", "chart"}:
@@ -379,7 +455,7 @@ def convert(pdf_path, output_path, language, status_path):
                         use_formula_recognition=False,
                         use_chart_recognition=False,
                         format_block_content=True,
-                        text_det_limit_side_len=1280,
+                        text_det_limit_side_len=OCR_TEXT_DETECTION_LIMIT,
                     )
                 finally:
                     sys.stdout, sys.stderr = original_stdout, original_stderr
@@ -404,7 +480,7 @@ def convert(pdf_path, output_path, language, status_path):
                         status_path,
                         f"Extracting digital text from page {page_number} of {total_pages}...",
                     )
-                    add_digital_page_text(document, page)
+                    add_digital_page_text(document, page, section)
                 else:
                     if structure is None:
                         raise RuntimeError("The OCR engine was not initialized for a scanned page.")

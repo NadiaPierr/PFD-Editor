@@ -4,7 +4,15 @@ from docx import Document
 from docx.oxml.ns import qn
 from PIL import Image
 
-from src.ocr_to_word_worker import add_html_table, add_layout_blocks
+from types import SimpleNamespace
+
+from src.ocr_to_word_worker import (
+    add_digital_page_text,
+    add_html_table,
+    add_layout_blocks,
+    normalized_text_lines,
+    order_positioned_items,
+)
 
 
 def test_add_html_table_creates_a_simple_table_with_cell_text():
@@ -102,3 +110,63 @@ def test_add_layout_blocks_sorts_and_formats_mixed_ocr_content():
     assert document.paragraphs[0].style.name == "Heading 1"
     assert document.tables[0].cell(0, 0).text == "Cell"
     assert list(body_children[3].iter(qn("w:drawing")))
+
+
+def test_reading_order_keeps_columns_together():
+    blocks = [
+        {"text": "right 1", "bbox": [220, 80, 380, 110]},
+        {"text": "left 1", "bbox": [20, 80, 180, 110]},
+        {"text": "right 2", "bbox": [220, 130, 380, 160]},
+        {"text": "left 2", "bbox": [20, 130, 180, 160]},
+    ]
+
+    ordered = order_positioned_items(blocks, lambda item: item["bbox"], 400)
+
+    assert [item["text"] for item in ordered] == [
+        "left 1",
+        "left 2",
+        "right 1",
+        "right 2",
+    ]
+
+
+def test_digital_text_retains_span_formatting():
+    page = SimpleNamespace(
+        rect=SimpleNamespace(width=600),
+        get_text=lambda _kind: {
+            "blocks": [
+                {
+                    "type": 0,
+                    "bbox": [60, 40, 540, 80],
+                    "lines": [
+                        {
+                            "spans": [
+                                {
+                                    "text": "Styled",
+                                    "font": "ABCDEF+Arial",
+                                    "size": 14,
+                                    "flags": 18,
+                                    "color": 0x123456,
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    document = Document()
+
+    add_digital_page_text(document, page)
+
+    run = document.paragraphs[0].runs[0]
+    assert run.text == "Styled"
+    assert run.bold is True
+    assert run.italic is True
+    assert run.font.name == "Arial"
+    assert run.font.size.pt == 14
+    assert str(run.font.color.rgb) == "123456"
+
+
+def test_ocr_postprocessing_joins_only_line_break_hyphenation():
+    assert normalized_text_lines("μετα-\nτροπή\nPDF-123") == ["μετατροπή", "PDF-123"]

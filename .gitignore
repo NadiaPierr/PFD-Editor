@@ -1,5 +1,37 @@
+# Virtual environments and local configuration
 .venv/
-backup/
+venv/
+.env
+.env.*
+!.env.example
+
+# Python caches
 __pycache__/
 *.py[cod]
+
+# Tests, coverage, and static-analysis caches
 .pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+
+# Runtime and local working files
+*.log
+*.tmp
+*.bak
+backup/
+
+# OS and IDE metadata (shared VS Code settings remain tracked)
+.idea/
+.DS_Store
+Thumbs.db
